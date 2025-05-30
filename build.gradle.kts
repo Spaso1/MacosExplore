@@ -36,6 +36,7 @@ compose.desktop {
             macOS {
                 iconFile.set(project.file("src/main/resources/icons/app_icon.icns"))
                 bundleID = "com.reisa.explore"
+
             }
         }
     }

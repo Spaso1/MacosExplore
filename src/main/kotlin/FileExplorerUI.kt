@@ -382,9 +382,7 @@ fun FileExplorerUI(
                     FileListPanel(
                         files = directoryContents,
                         onOpen = { item ->
-                            if (selectedFiles.isNotEmpty()) {
-                                toggleFileSelection(item)
-                            } else {
+
                                 val safePath = if (item.path.startsWith("adb://")) {
                                     val cleaned = item.path.removePrefix("adb://")
                                     "adb://${cleaned.split("/").joinToString("/") { it.trim('/') }}"
@@ -393,13 +391,36 @@ fun FileExplorerUI(
                                 }
 
                                 if (item.isDirectory) {
+                                    //修复adb
                                     pathHistory = pathHistory + safePath
-                                    currentPath = safePath
-                                    //selectedFiles = emptySet()
+                                    if (pathHistory.last().startsWith("adb://")) {
+                                        println(2)
+                                        //修改最后这个
+                                        var pathUse = ""
+                                        val temp = pathHistory.last()
+                                        //如果有两个adb://
+                                        if (pathHistory.last().contains("adb://")) {
+                                            pathUse =temp.replaceFirst("adb://", "")
+                                            if (pathUse.contains("adb://")) {
+                                                //从adb://xxadb开始截取
+                                                val serial = temp.split("adb://")[2]
+                                                pathUse = "adb://" + serial
+                                            }else{
+                                                currentPath = safePath
+                                            }
+                                        }
+                                        println(pathUse)
+                                        currentPath = pathUse
+                                    }else{
+                                        currentPath = safePath
+                                        println(safePath)
+                                    }
+                                    //currentPath = safePath
+
+                                    selectedFiles = emptySet()
                                 } else {
                                     openFileWithPrompt(item.path)
                                 }
-                            }
                         },
                         onRightClick = { item, offset ->
                             if (selectedFiles.isEmpty()) {
