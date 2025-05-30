@@ -21,6 +21,8 @@ dependencies {
     // compose.desktop.currentOs should be used in launcher-sourceSet
     // (in a separate module for demo project and in testMain).
     // With compose.desktop.common you will also lose @Preview functionality
+    implementation("org.eclipse.jgit:org.eclipse.jgit:6.5.0.202303070854-r")
+
     implementation(compose.desktop.currentOs)
 }
 

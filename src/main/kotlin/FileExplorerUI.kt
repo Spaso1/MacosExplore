@@ -9,6 +9,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
@@ -25,12 +26,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.api.TransportConfigCallback
+import org.eclipse.jgit.transport.HttpTransport
+import org.eclipse.jgit.transport.Transport
 import utils.*
 import java.awt.Desktop
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import javax.net.ssl.*
 import javax.swing.JOptionPane
 
 
@@ -71,6 +79,68 @@ fun groupFilesByType(files: List<FileSystemItem>): Map<String, List<FileSystemIt
     return grouped
 }
 
+private fun cloneGitRepository(repoUrl: String, targetDir: File) {
+    try {
+        // 创建信任所有证书的 SSLContext
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun getAcceptedIssuers(): Array<X509Certificate>? = null
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+        })
+
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, trustAllCerts, SecureRandom())
+
+        // 设置全局默认 SSL 上下文（适用于 JGit 6.x）
+        HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
+        HttpsURLConnection.setDefaultHostnameVerifier() { _, _ -> true }
+
+        // 开始克隆
+        Git.cloneRepository()
+            .setURI(repoUrl)
+            .setDirectory(targetDir)
+            .setTransportConfigCallback(object : TransportConfigCallback {
+                override fun configure(transport: Transport?) {
+                    // JGit 6.x 不再允许直接设置 sslSocketFactory，我们依赖全局设置
+                }
+            })
+            .call()
+
+    } catch (e: Exception) {
+        e.printStackTrace()
+        if (e.message?.contains("URL") == false) {
+            JOptionPane.showMessageDialog(
+                null,
+                "克隆仓库失败: ${e.message}",
+                "Git 错误",
+                JOptionPane.ERROR_MESSAGE
+            )
+        }
+
+    }
+}
+@Composable
+fun GitCloningDialog(repoUrl: String, targetDir: File, onCloned: () -> Unit) {
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(repoUrl) {
+        launch(Dispatchers.Main) {
+            JOptionPane.showMessageDialog(
+                null,
+                "正在克隆仓库，请稍等...",
+                "Git 克隆",
+                JOptionPane.INFORMATION_MESSAGE
+            )
+        }
+
+        withContext(Dispatchers.IO) {
+            cloneGitRepository(repoUrl, targetDir)
+        }
+
+        onCloned()
+    }
+}
+
 // ==== 工具函数 ====
 
 fun listFiles(path: String, showHidden: Boolean = false): List<FileSystemItem> {
@@ -89,7 +159,16 @@ fun listFiles(path: String, showHidden: Boolean = false): List<FileSystemItem> {
                 emptyList()
             }
         }
-
+        path.startsWith("git://") -> {
+            val repoPath = path.removePrefix("git://")
+            val localDir = File(System.getProperty("user.home")+ "/Downloads/git/${repoPath.hashCode()}")
+            if (!localDir.exists()) {
+                cloneGitRepository(repoPath, localDir)
+            }
+            localDir.listFiles()?.map { LocalFile(it).toFileSystemItem() }?.filterNot {
+                !showHidden && it.name.startsWith(".")
+            } ?: emptyList()
+        }
         else -> {
             val file = File(path)
             if (!file.exists() || !file.isDirectory) emptyList()
@@ -179,6 +258,26 @@ fun moveFile(srcPath: String, destPath: String): Boolean {
         }
     }
 }
+//压缩
+fun compressFiles(paths: List<String>, destPath: String): Boolean {
+    return try {
+        val zipFile = File(destPath )
+
+        //设置名称
+        if (zipFile.exists()) {
+            JOptionPane.showMessageDialog(null, "目标压缩文件已存在", "错误", JOptionPane.ERROR_MESSAGE)
+            return false
+        }
+        ZipUtils.compress(paths.map { File(it) }, zipFile)
+
+        //提示压缩完成
+         JOptionPane.showMessageDialog(null, "压缩完成", "提示", JOptionPane.INFORMATION_MESSAGE)
+        true
+    } catch (e: Exception) {
+        e.printStackTrace()
+        false
+    }
+}
 
 fun openFileWithPrompt(filePath: String): Boolean {
     if (filePath.startsWith("adb://")) {
@@ -243,6 +342,12 @@ fun loadFavoritesFromDisk(): List<String> {
         emptyList()
     }
 }
+fun calculateDirectoryHash(path: String): Int {
+    if (path.startsWith("adb://")) return 0
+    val file = File(path)
+    if (!file.exists() || !file.isDirectory) return 0
+    return file.listFiles()?.toList().orEmpty().joinToString(separator = "|") { it.name + it.length() }.hashCode()
+}
 
 
 fun saveFavoritesToDisk(favorites: List<String>) {
@@ -273,6 +378,34 @@ fun FileExplorerUI(
     var favorites by remember { mutableStateOf(mutableStateListOf<String>().apply { addAll(loadFavoritesFromDisk()) }) }
     var pathHistory by remember { mutableStateOf(listOf(currentPath)) }
     var isShowHide by remember { mutableStateOf(false) }
+    var lastHash by remember(currentPath) { mutableStateOf(0) }
+
+// 使用 produceState 轮询检测目录是否被修改
+    val isDirectoryModified by produceState(initialValue = false, key1 = currentPath) {
+        while (true) {
+            delay(2000) // 每两秒检查一次
+            val newHash = calculateDirectoryHash(currentPath)
+            if (newHash != lastHash && lastHash != 0) {
+                value = true
+            } else {
+                value = false
+            }
+            lastHash = newHash
+        }
+    }
+
+// 当目录内容变化时重新加载
+    LaunchedEffect(isDirectoryModified) {
+        if (isDirectoryModified) {
+            directoryContents = listFiles(currentPath, isShowHide)
+        }
+    }
+
+// 初始加载时记录哈希
+    LaunchedEffect(currentPath) {
+        lastHash = calculateDirectoryHash(currentPath)
+    }
+
 
     val externalDrives by produceState(initialValue = listExternalDrivesMac()) {
         while (true) {
@@ -304,6 +437,7 @@ fun FileExplorerUI(
         add(FileSystemItem("Home", System.getProperty("user.home")!!, true))
         add(FileSystemItem("下载", "${System.getProperty("user.home")}/Downloads", true))
         add(FileSystemItem("文档", "${System.getProperty("user.home")}/Documents", true))
+        add(FileSystemItem("桌面", "${System.getProperty("user.home")}/Desktop", true))
         addAll(androidFolders)
         addAll(externalDrives)
     }
@@ -342,6 +476,7 @@ fun FileExplorerUI(
                 selectedPath = currentPath
             )
 
+
             Box(modifier = Modifier.weight(4f).fillMaxHeight()) {
                 Column(Modifier.fillMaxHeight()) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -378,7 +513,6 @@ fun FileExplorerUI(
                             }
                         })
                     }
-
                     FileListPanel(
                         files = directoryContents,
                         onOpen = { item ->
@@ -497,6 +631,20 @@ fun FileExplorerUI(
                                 showDeleteDialog = true
                                 contextMenuPosition = null
                                 selectedItem = null
+                            },
+                            onCompress = {
+                                if (selectedFiles.isNotEmpty()) {
+                                    val filesToCompress = selectedFiles.map { it.path }
+                                    val defaultName = "archive_${System.currentTimeMillis()}.zip"
+                                    val destPath = "$currentPath/$defaultName"
+
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            compressFiles(filesToCompress, destPath)
+                                        }
+                                        directoryContents = listFiles(currentPath)
+                                    }
+                                }
                             }
                         )
 
@@ -680,6 +828,15 @@ fun FileListPanel(
             groupFilesByType(files.sortedBy { !it.isDirectory })
         }
     }
+    var dragStart by remember { mutableStateOf<Offset?>(null) }
+    var selectionBox by remember { mutableStateOf<Rect?>(null) }
+    var currentSelectedFiles by remember { mutableStateOf(selectedFiles.toMutableSet()) }
+
+    // 同步外部状态
+    LaunchedEffect(selectedFiles) {
+        currentSelectedFiles.clear()
+        currentSelectedFiles.addAll(selectedFiles)
+    }
 
     LazyColumn(modifier = Modifier.padding(8.dp).fillMaxHeight()) {
         groupedFiles.forEach { (groupName, groupItems) ->
@@ -692,12 +849,27 @@ fun FileListPanel(
                 )
                 Divider()
             }
-
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Checkbox(
+                        checked = false,
+                        onCheckedChange = { isChecked ->
+                            groupItems.forEach { file ->
+                                if (isChecked) {
+                                    onToggleSelection(file) // 添加到选中
+                                } else {
+                                    selectedFiles.find { it.path == file.path }?.let { existingFile ->
+                                        onToggleSelection(existingFile) // 移除
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.width(48.dp)
+                    )
+
                     Text("选择", fontWeight = FontWeight.Bold, modifier = Modifier.width(48.dp))
                     Text("名称", fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.4f))
                     Text("类型", fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.2f))
@@ -711,8 +883,9 @@ fun FileListPanel(
                 val isSelected = file == selectedItem
                 val isChecked = file in selectedFiles
                 var lastClickTime by remember(file) { mutableStateOf(0L) }
-// ✅ 兼容写法
                 var selectedFiles by remember { mutableStateOf(mutableSetOf<FileSystemItem>()) }
+                var isDragging by remember { mutableStateOf(false) }
+                var dragSelectionStart by remember { mutableStateOf<FileSystemItem?>(null) }
 
                 fun toggleFileSelection(file: FileSystemItem) {
                     val newSet = selectedFiles.toMutableSet()
@@ -803,7 +976,7 @@ fun FileListPanel(
                             .clickable { onToggleSelection(file) },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CustomIcon(isDirectory = file.isDirectory)
+                        CustomIcon(isDirectory = file.isDirectory, name = file.name)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(text = file.name)
                     }
@@ -820,8 +993,91 @@ fun FileListPanel(
 
 
 @Composable
-fun CustomIcon(isDirectory: Boolean) {
-    val resourceId = if (isDirectory) "icons/folder.png" else "icons/file.png"
+fun CustomIcon(isDirectory: Boolean,name: String) {
+    var resourceId = if (isDirectory) "icons/folder.png" else "icons/file.png"
+    if (resourceId.startsWith("icons/file")) {
+        if (name.endsWith(".png")) {
+            resourceId = "icons/photo.png"
+        }
+        if (name.endsWith(".jpg")) {
+            resourceId = "icons/photo.png"
+        }
+        if (name.endsWith(".jpeg")) {
+            resourceId = "icons/photo.png"
+        }
+        if (name.endsWith(".gif")) {
+            resourceId = "icons/photo.png"
+        }
+        if (name.endsWith(".md")) {
+            resourceId = "icons/MD.png"
+        }
+        if (name.endsWith(".txt")) {
+            resourceId = "icons/txt.png"
+        }
+        if (name.endsWith(".pdf")) {
+            resourceId = "icons/pdf.png"
+        }
+        if (name.endsWith(".doc")) {
+            resourceId = "icons/doc.png"
+        }
+        if (name.endsWith(".docx")) {
+            resourceId = "icons/doc.png"
+        }
+        if (name.endsWith(".xls")) {
+            resourceId = "icons/excel.png"
+        }
+        if (name.endsWith(".xlsx")) {
+            resourceId = "icons/excel.png"
+        }
+        if (name.endsWith(".zip")) {
+            resourceId = "icons/zip.png"
+        }
+        if (name.endsWith(".pages")) {
+            resourceId = "icons/Page.png"
+        }
+        if (name.endsWith(".ppt")) {
+            resourceId = "icons/ppt.png"
+        }
+        if (name.endsWith(".pptx")) {
+            resourceId = "icons/ppt.png"
+        }
+        if (name.endsWith(".key")) {
+            resourceId = "icons/ppt.png"
+        }
+        if (name.endsWith(".numbers")) {
+            resourceId = "icons/ppt.png"
+        }
+        if (name.endsWith(".keynote")) {
+            resourceId = "icons/ppt.png"
+        }
+        if (name.endsWith(".css")) {
+            resourceId = "icons/css.png"
+        }
+        if (name.endsWith(".js")) {
+            resourceId = "icons/js.png"
+        }
+        if (name.endsWith(".html")) {
+            resourceId = "icons/HTML.png"
+        }
+        if ( name.endsWith(".ts")) {
+            resourceId = "icons/ts.png"
+        }
+        if ( name.endsWith(".properties")) {
+             resourceId = "icons/prop.png"
+        }
+        if ( name.endsWith(".yaml")) {
+             resourceId = "icons/json.png"
+        }
+         if ( name.endsWith("gradle.json")) {
+             resourceId = "icons/gradle.png"
+        }
+        if ( name.endsWith(".mp3")) {
+             resourceId = "icons/music.png"
+        }
+         if ( name.endsWith(".flac")) {
+             resourceId = "icons/video.png"
+        }
+    }
     Image(
         painter = painterResource(resourceId),
         contentDescription = null,
@@ -880,7 +1136,7 @@ fun NavigationSidebar(
                             }else { }
                         }
                 ) {
-                    CustomIcon(isDirectory = file.isDirectory)
+                    CustomIcon(isDirectory = file.isDirectory, name = file.name)
                     Spacer(Modifier.width(4.dp))
                     Text(
                         text = file.name,
@@ -922,8 +1178,10 @@ fun ContextualMenu(
     onCut: () -> Unit,
     onCopy: () -> Unit,
     onPaste: () -> Unit,
+    onCompress: () -> Unit,
     onAddToFavorites: () -> Unit,
     onDelete: () -> Unit
+
 ) {
     Surface(
         elevation = 8.dp,
@@ -938,6 +1196,7 @@ fun ContextualMenu(
             MenuItem("复制", onClick = { onCopy(); onDismiss() })
             MenuItem("粘贴", onClick = { onPaste(); onDismiss() })
             MenuItem("添加收藏", onClick = { onAddToFavorites(); onDismiss() })
+            MenuItem("压缩", onClick = { onCompress(); onDismiss() }) // 新增项
             Divider()
             MenuItem("删除", onClick = { onDelete(); onDismiss() })
         }
