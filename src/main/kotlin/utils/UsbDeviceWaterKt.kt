@@ -1,10 +1,9 @@
 package utils
 
+import FileSystemItem
 import androidx.compose.runtime.*
 import kotlinx.coroutines.delay
 import java.io.File
-
-data class FileSystemItem(val name: String, val path: String, val isDirectory: Boolean)
 
 fun findUsbDeviceFolders(): List<FileSystemItem> {
     val results = mutableListOf<FileSystemItem>()

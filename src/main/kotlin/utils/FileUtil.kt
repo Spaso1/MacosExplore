@@ -31,6 +31,8 @@ fun copyFile(src: String, dst: String): Boolean {
     val target = File(dst)
     return try {
         source.copyRecursively(target, overwrite = true)
+        println(source)
+        println(target)
         true
     } catch (e: Exception) {
         false

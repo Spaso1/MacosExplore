@@ -16,8 +16,8 @@ import utils.ClipboardAction
 fun FileExplorerMainFrame(
     windowIndex: Int,
     onRequestNewWindow: () -> Unit,
-    clipboard: Pair<String, ClipboardAction>?,
-    setClipboard: (Pair<String, ClipboardAction>?) -> Unit
+    clipboard: Pair<List<String>, ClipboardAction>?,
+    setClipboard: (Pair<List<String>, ClipboardAction>?) -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var menuOffset by remember { mutableStateOf(Offset.Zero) }
